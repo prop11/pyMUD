@@ -1,2 +1,2 @@
 # pyMUD
-A Python based MUD application
+A highly extensible Python based MUD client

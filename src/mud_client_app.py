@@ -13,6 +13,9 @@ class MUDClientApp:
 
         self.setup_gui()
 
+        # Initialize HUD elements
+        self.create_hud()
+
     def setup_gui(self):
         self.profile_listbox = tk.Listbox(self.root)
         self.profile_listbox.pack(fill=tk.BOTH, expand=True)
@@ -58,6 +61,32 @@ class MUDClientApp:
             self.profile_manager.remove_profile(selected_profile)
             self.load_profiles()
 
+    def create_hud(self):
+        self.hud_frame = tk.Frame(self.root, bg="gray")
+        self.hud_frame.pack(side=tk.TOP, fill=tk.X)
+
+        self.connection_label = tk.Label(self.hud_frame, text="Not connected", bg="gray", fg="white")
+        self.connection_label.pack(side=tk.LEFT, padx=10)
+
+        self.health_label = tk.Label(self.hud_frame, text="Health: N/A", bg="gray", fg="white")
+        self.health_label.pack(side=tk.LEFT, padx=10)
+
+    def update_connection_status(self, connected):
+        if connected:
+            self.connection_label.config(text="Connected", fg="green")
+        else:
+            self.connection_label.config(text="Not connected", fg="red")
+
+    def update_health(self, health):
+        self.health_label.config(text=f"Health: {health}")
+
+    def display_message(self, message, color=None):
+        self.output_text.config(state=tk.NORMAL)
+        self.output_text.insert(tk.END, message, color)
+        self.output_text.insert(tk.END, "\n")
+        self.output_text.config(state=tk.DISABLED)
+        self.output_text.yview(tk.END)
+
     def connect_to_profile(self):
         selected_profile = self.profile_listbox.get(tk.ACTIVE)
         if selected_profile:
@@ -67,9 +96,7 @@ class MUDClientApp:
     def connect(self, host, port):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((host, port))
-        self.output_text.config(state=tk.NORMAL)
-        self.output_text.insert(tk.END, f"Connected to {host}:{port}\n")
-        self.output_text.config(state=tk.DISABLED)
+        self.update_connection_status(True)
         self.receive_thread = threading.Thread(target=self.receive_messages)
         self.receive_thread.start()
 
@@ -78,26 +105,42 @@ class MUDClientApp:
             try:
                 message = self.sock.recv(1024).decode('utf-8')
                 if message:
-                    self.output_text.config(state=tk.NORMAL)
-                    if self.is_gmcp_message(message):
-                        self.handle_gmcp_message(message)
-                    else:
-                        self.output_text.insert(tk.END, message + "\n")
-                    self.output_text.config(state=tk.DISABLED)
-                    self.output_text.yview(tk.END)
+                    self.parse_and_display_message(message)
+                    # Example: Simulate GMCP health message
+                    if "GMCP" in message:
+                        gmcp_data = message.split("GMCP ")[1]
+                        if "Char.Vitals" in gmcp_data:
+                            health_data = gmcp_data.split("Char.Vitals ")[1]
+                            health = health_data.split(",")[0]
+                            self.update_health(health)
             except:
                 break
 
-    def is_gmcp_message(self, message):
-        return message.startswith("\xFF\xFA") and message.endswith("\xFF\xF0")
+    def parse_and_display_message(self, message):
+        # Regular expression to match ANSI escape codes for text color
+        color_pattern = re.compile(r'\x1b\[(\d+)(;\d+)?m')
 
-    def handle_gmcp_message(self, message):
-        # Extract and parse the GMCP message
-        match = re.match(r"\xFF\xFA[^\xFF]*?\xFF\xF0", message)
-        if match:
-            gmcp_message = match.group(0)[2:-2]  # Remove Telnet IAC bytes
-            # Process the GMCP message here...
-            self.output_text.insert(tk.END, f"GMCP Message: {gmcp_message}\n")
+        # Split the message based on ANSI escape codes
+        parts = color_pattern.split(message)
+
+        # Start with default color
+        current_color = "black"
+
+        # Iterate over message parts and display them with appropriate color
+        for part in parts:
+            if part.startswith("\x1b["):
+                # This part contains color information
+                color_code = int(part[2:-1])  # Extract color code
+                if color_code == 0:  # Reset color
+                    current_color = "black"
+                elif color_code == 31:  # Red color
+                    current_color = "red"
+                elif color_code == 32:  # Green color
+                    current_color = "green"
+                # Add more color codes as needed
+            else:
+                # Regular text, display with current color
+                self.display_message(part, color=current_color)
 
     def send_message(self, event):
         message = self.input_entry.get()

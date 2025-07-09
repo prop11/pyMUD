@@ -12,7 +12,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # --- MOCK ProfileManager for standalone testing ---
 # If src.profile_manager.py exists and works, you can remove or comment out this mock.
-# This mock allows you to run the MUDClientApp.py file directly for testing.
 class ProfileManager:
     def __init__(self):
         self.profiles = {
@@ -34,7 +33,6 @@ class ProfileManager:
 
 class MUDClientApp:
     # --- Fix 5 & 8: Define mappings for ANSI colors and styles to Tkinter tags ---
-    # These will be used to configure Tkinter text tags.
     ANSI_COLOR_MAP = {
         0: 'white',  # Reset color to default (often white on black for MUDs)
         30: 'black', 31: 'red', 32: 'green', 33: 'yellow',
@@ -43,7 +41,6 @@ class MUDClientApp:
         90: 'gray', 91: 'firebrick', 92: 'forestgreen', 93: 'gold',
         94: 'dodgerblue', 95: 'violet', 96: 'lightskyblue', 97: 'white'
     }
-    # Add support for background colors if your MUD uses them
     # ANSI_BG_COLOR_MAP = {40: 'black', 41: 'red', ...}
 
     # Regex to find ANSI escape sequences: captures codes like "0", "31", "1;32"

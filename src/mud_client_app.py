@@ -1,32 +1,17 @@
 import tkinter as tk
 from tkinter import messagebox, simpledialog, scrolledtext
-from src.profile_manager import ProfileManager
+from src.profile_manager import ProfileManager # Keep this import!
 import socket
 import threading
 import re
 import json
 import logging
+# import os # No longer needed here as ProfileManager handles file paths
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- MOCK ProfileManager for standalone testing ---
-class ProfileManager:
-    def __init__(self):
-        self.profiles = {
-            "Example MUD 1": {"host": "mud.example.com", "port": 4000},
-            "Local Test": {"host": "127.0.0.1", "port": 5000}
-        }
-        logging.info("ProfileManager initialized with mock profiles.")
-
-    def add_profile(self, name, host, port):
-        self.profiles[name] = {"host": host, "port": port}
-        logging.info(f"Profile '{name}' added to mock manager.")
-
-    def remove_profile(self, name):
-        if name in self.profiles:
-            del self.profiles[name]
-            logging.info(f"Profile '{name}' removed from mock manager.")
-# --- End MOCK ProfileManager ---
+# --- ProfileManager class definition is removed from here ---
+# It's now in src/profile_manager.py
 
 
 class MUDClientApp:
@@ -46,7 +31,8 @@ class MUDClientApp:
     def __init__(self, root):
         self.root = root
         self.root.title("MUD Client")
-        self.profile_manager = ProfileManager()
+        # Instantiate the ProfileManager from src/profile_manager.py
+        self.profile_manager = ProfileManager() 
 
         self.sock = None
         self.receive_thread = None
@@ -76,7 +62,7 @@ class MUDClientApp:
         self.remove_btn = tk.Button(profile_btn_frame, text="Remove Profile", command=self.remove_profile)
         self.remove_btn.pack(fill=tk.X, pady=2)
         
-        self.load_profiles()
+        self.load_profiles() # Load profiles into the listbox when GUI is set up
 
         connect_disconnect_frame = tk.Frame(self.root)
         connect_disconnect_frame.pack(fill=tk.X, pady=2, padx=5, expand=False)
@@ -107,11 +93,12 @@ class MUDClientApp:
 
 
     def load_profiles(self):
+        """Loads profiles from manager into the listbox."""
         self.profile_listbox.delete(0, tk.END)
         for profile_name in self.profile_manager.profiles:
             self.profile_listbox.insert(tk.END, profile_name)
         if self.profile_manager.profiles:
-            self.profile_listbox.selection_set(0)
+            self.profile_listbox.selection_set(0) # Select first profile by default
 
 
     def add_profile(self):
@@ -133,7 +120,7 @@ class MUDClientApp:
             return
 
         self.profile_manager.add_profile(name, host, port)
-        self.load_profiles()
+        self.load_profiles() # Refresh listbox after adding
         messagebox.showinfo("Success", f"Profile '{name}' added.")
 
 
@@ -145,7 +132,7 @@ class MUDClientApp:
         selected_profile = self.profile_listbox.get(selected_index[0])
         if messagebox.askyesno("Confirm Remove", f"Are you sure you want to remove '{selected_profile}'?"):
             self.profile_manager.remove_profile(selected_profile)
-            self.load_profiles()
+            self.load_profiles() # Refresh listbox after removing
             messagebox.showinfo("Success", f"Profile '{selected_profile}' removed.")
 
 
@@ -214,7 +201,6 @@ class MUDClientApp:
         profile = self.profile_manager.profiles.get(selected_profile_name)
 
         if profile:
-            # FIX: Use lambda to pass tags keyword argument
             self.display_message(f"--- Attempting to connect to {profile['host']}:{profile['port']} ---", tags=("system_message",))
             self.status_message_label.config(text="Connecting...")
             
@@ -234,7 +220,6 @@ class MUDClientApp:
             self.sock.settimeout(None)
 
             self.root.after(0, self.update_connection_status, True)
-            # FIX: Use lambda to pass tags keyword argument to display_message
             self.root.after(0, lambda: self.display_message("--- Connected to MUD ---", tags=("system_message", "ansi_32")))
 
             self.receive_thread = threading.Thread(target=self.receive_messages)
@@ -242,17 +227,14 @@ class MUDClientApp:
             self.receive_thread.start()
             
         except socket.timeout:
-            # FIX: Use lambda to pass tags keyword argument to display_message
             self.root.after(0, lambda: self.display_message("Connection timed out.", tags=("system_message", "ansi_31")))
             self.root.after(0, self.update_connection_status, False)
             logging.error(f"Connection timed out to {host}:{port}")
         except socket.error as e:
-            # FIX: Use lambda to pass tags keyword argument to display_message
             self.root.after(0, lambda msg_text=f"Connection error: {e}": self.display_message(msg_text, tags=("system_message", "ansi_31")))
             self.root.after(0, self.update_connection_status, False)
             logging.error(f"Socket error connecting to {host}:{port}: {e}")
         except Exception as e:
-            # FIX: Use lambda to pass tags keyword argument to display_message
             self.root.after(0, lambda msg_text=f"An unexpected error occurred during connection: {e}": self.display_message(msg_text, tags=("system_message", "ansi_31")))
             self.root.after(0, self.update_connection_status, False)
             logging.exception("Unexpected error during connection")
@@ -275,7 +257,6 @@ class MUDClientApp:
             self.sock = None
             self.receive_thread = None
             self.root.after(0, self.update_connection_status, False)
-            # FIX: Use lambda to pass tags keyword argument to display_message
             self.root.after(0, lambda: self.display_message("--- Disconnected from MUD ---", tags=("system_message", "ansi_31")))
 
 
@@ -287,7 +268,6 @@ class MUDClientApp:
 
                 if not message_bytes:
                     logging.info("Server disconnected gracefully.")
-                    # FIX: Use lambda to pass tags keyword argument to display_message
                     self.root.after(0, lambda: self.display_message("--- Server disconnected unexpectedly ---", tags=("system_message", "ansi_31")))
                     self.root.after(0, self.disconnect)
                     break
@@ -313,13 +293,11 @@ class MUDClientApp:
             except socket.error as e:
                 if self.connected:
                     logging.error(f"Socket error in receive_messages: {e}")
-                    # FIX: Use lambda to pass tags keyword argument to display_message
                     self.root.after(0, lambda msg_text=f"--- Network error: {e} ---": self.display_message(msg_text, tags=("system_message", "ansi_31")))
                     self.root.after(0, self.disconnect)
                 break
             except Exception as e:
                 logging.exception(f"An unexpected error occurred in receive_messages: {e}")
-                # FIX: Use lambda to pass tags keyword argument to display_message
                 self.root.after(0, lambda msg_text=f"--- An unexpected error occurred: {e} ---": self.display_message(msg_text, tags=("system_message", "ansi_31")))
                 self.root.after(0, self.disconnect)
                 break
@@ -384,7 +362,6 @@ class MUDClientApp:
 
     def send_message(self, event=None):
         if not self.connected or not self.sock:
-            # FIX: Use lambda to pass tags keyword argument
             self.display_message("--- Not connected. Cannot send message. ---", tags=("system_message", "ansi_31"))
             return
 
@@ -396,12 +373,10 @@ class MUDClientApp:
             self.sock.sendall((message + "\n").encode('utf-8'))
             self.input_entry.delete(0, tk.END)
         except socket.error as e:
-            # FIX: Use lambda to pass tags keyword argument
             self.display_message(f"--- Failed to send message: {e} ---", tags=("system_message", "ansi_31"))
             logging.error(f"Failed to send message: {e}")
             self.disconnect()
         except Exception as e:
-            # FIX: Use lambda to pass tags keyword argument
             self.display_message(f"--- Unexpected error sending message: {e} ---", tags=("system_message", "ansi_31"))
             logging.exception(f"Unexpected error sending message: {e}")
 

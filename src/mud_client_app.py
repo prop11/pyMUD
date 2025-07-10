@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import messagebox, simpledialog, scrolledtext
-from src.profile_manager import ProfileManager
+from .profile_manager import ProfileManager # Relative import
 import socket
 import threading
 import re
@@ -10,6 +10,12 @@ import os
 import importlib.util
 import sys
 import time
+
+# NEW IMPORTS: For Alias Management and new Profile Windows
+from .alias_manager import AliasManager # Relative import
+from .alias_manager_window import AliasManagerWindow # Relative import
+from .profile_selection_dialog import ProfileSelectionDialog # NEW
+from .profile_manager_window import ProfileManagerWindow # NEW
 
 # I'm setting the logging level to DEBUG for thorough analysis.
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -66,61 +72,75 @@ class MUDClientApp:
         self.root = root
         self.root.title("Python MUD Client")
 
-        self.profile_manager = ProfileManager() 
+        self.profile_manager = ProfileManager()
+        self.alias_manager = AliasManager(alias_file="aliases.json")
+        
+        self.alias_window = None # To hold the instance of the alias manager window
+        self.profile_manager_window = None # To hold the instance of the profile manager window
 
         self.sock = None
         self.receive_thread = None
-        self.connected = False # This will be set by my update_connection_status method.
+        self.connected = False 
+        self.current_profile = None # Stores the name of the currently connected profile
 
         self.loaded_mods = [] 
-        self.gmcp_listeners = [] # This list will hold my GMCP callback functions.
+        self.gmcp_listeners = [] 
 
         # --- My Telnet Parsing State Variables ---
-        self.telnet_buffer = b"" # My buffer for raw incoming bytes from the socket.
+        self.telnet_buffer = b"" 
         self.telnet_parser_state = self.STATE_NORMAL
-        self.telnet_sub_buffer = b"" # My buffer for data within a subnegotiation block.
+        self.telnet_sub_buffer = b"" 
 
         self.setup_gui()
         self.create_hud()
         self.define_text_tags()
-        self.load_mods() # I'll load my mods after the GUI is set up.
+        self.load_mods() 
 
         # I'm registering my client's own HUD as a GMCP listener.
         self.register_gmcp_listener(self._update_client_hud_from_gmcp)
 
-        self.update_gui_state() # I'll set the initial GUI state based on my connection status.
-        self.root.protocol("WM_WM_DELETE_WINDOW", self.on_closing)
+        self.update_gui_state() 
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Load profiles immediately, but the GUI elements are now managed by update_gui_state
+        self.load_profiles()
 
     def setup_gui(self):
         """I'm setting up the main graphical user interface elements."""
+        # Create a menu bar
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # Create a "Servers" menu
+        self.servers_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Servers", menu=self.servers_menu)
+        self.servers_menu.add_command(label="Connect to Profile...", command=self.open_profile_selection_dialog)
+        self.servers_menu.add_command(label="Disconnect", command=self.disconnect)
+        self.servers_menu.add_separator()
+        self.servers_menu.add_command(label="Manage Profiles...", command=self.open_profile_manager_window)
+
+        # Create a "Tools" menu
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="Alias Manager", command=self.open_alias_manager_window)
+
+        # Main content frame for output and input
         main_content_frame = tk.Frame(self.root)
         main_content_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        profile_frame = tk.Frame(main_content_frame)
-        profile_frame.pack(fill=tk.X, pady=5, expand=False)
+        # This frame will hold the profile selection GUI.
+        # Its visibility will be controlled by update_gui_state.
+        self.profile_frame = tk.LabelFrame(main_content_frame, text="Profile Selection", padx=10, pady=10)
+        # self.profile_frame.pack(fill=tk.X, pady=5, expand=False) # REMOVED: Managed by update_gui_state
 
-        self.profile_listbox = tk.Listbox(profile_frame, height=5)
-        self.profile_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # NOTE: The listbox and buttons are now managed within ProfileManagerWindow
+        # but for initial display if not connected, we keep a placeholder or just
+        # let update_gui_state handle initial pack().
+        # However, since we're moving the selection, these are technically gone from the main view.
+        # They will be recreated in ProfileManagerWindow.
 
-        profile_btn_frame = tk.Frame(profile_frame)
-        profile_btn_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5)
-
-        self.add_btn = tk.Button(profile_btn_frame, text="Add Profile", command=self.add_profile)
-        self.add_btn.pack(fill=tk.X, pady=2)
-
-        self.remove_btn = tk.Button(profile_btn_frame, text="Remove Profile", command=self.remove_profile)
-        self.remove_btn.pack(fill=tk.X, pady=2)
-        
-        self.load_profiles()
-
-        connect_disconnect_frame = tk.Frame(main_content_frame)
-        connect_disconnect_frame.pack(fill=tk.X, pady=2, expand=False)
-
-        self.connect_btn = tk.Button(connect_disconnect_frame, text="Connect", command=self.connect_to_profile)
-        self.connect_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-
-        self.disconnect_btn = tk.Button(connect_disconnect_frame, text="Disconnect", command=self.disconnect)
-        self.disconnect_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        # The profile_listbox, add_btn, remove_btn are now part of ProfileManagerWindow
+        # and ProfileSelectionDialog, NOT directly in MUDClientApp's main frame.
 
         text_frame = tk.Frame(main_content_frame)
         text_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -147,49 +167,38 @@ class MUDClientApp:
             self.output_text.tag_config(f"ansi_{code}", foreground=color_name)
         
         self.output_text.tag_config("system_message", foreground="lightgray", font=("TkDefaultFont", 10, "italic"))
+        self.output_text.tag_config("user_input", foreground="lightblue", font=("Courier New", 10))
+
 
     def load_profiles(self):
-        """I'm loading profiles from ProfileManager into the listbox."""
-        self.profile_listbox.delete(0, tk.END)
-        for profile_name in self.profile_manager.profiles:
-            self.profile_listbox.insert(tk.END, profile_name)
-        if self.profile_manager.profiles:
-            self.profile_listbox.selection_set(0)
+        """
+        I'm loading profiles. This is primarily for the ProfileManagerWindow
+        and ProfileSelectionDialog now. The main window no longer displays them
+        directly on load.
+        """
+        # The listbox on the main window is gone.
+        # The actual loading into a listbox happens in the dedicated windows.
+        pass # No action needed on main GUI
 
     def add_profile(self):
-        """I'm prompting the user for new profile details and adding it via ProfileManager."""
-        name = simpledialog.askstring("Profile Name", "Enter profile name:")
-        if not name: return
-        if name in self.profile_manager.profiles:
-            messagebox.showerror("Error", "Profile with this name already exists.")
-            return
-        host = simpledialog.askstring("Host", "Enter host address:")
-        if not host: return
-        try:
-            port = simpledialog.askinteger("Port", "Enter port number:")
-            if port is None: return
-            if not (1 <= port <= 65535):
-                messagebox.showerror("Error", "Port must be between 1 and 65535.")
-                return
-        except ValueError:
-            messagebox.showerror("Error", "Invalid port number. Please enter an integer.")
-            return
-
-        self.profile_manager.add_profile(name, host, port)
-        self.load_profiles()
-        messagebox.showinfo("Success", f"Profile '{name}' added.")
+        """
+        This method will now only be called from ProfileManagerWindow.
+        It handles adding a profile via ProfileManager and then
+        requests the ProfileManagerWindow to refresh its display.
+        """
+        # This will be handled by the ProfileManagerWindow's own add_profile_gui method.
+        # This method in MUDClientApp might still be used by external calls, but
+        # the GUI interaction is now delegated.
+        pass
 
     def remove_profile(self):
-        """I'm removing the selected profile via ProfileManager."""
-        selected_index = self.profile_listbox.curselection()
-        if not selected_index:
-            messagebox.showwarning("Warning", "No profile selected to remove.")
-            return
-        selected_profile = self.profile_listbox.get(selected_index[0])
-        if messagebox.askyesno("Confirm Remove", f"Are you sure you want to remove '{selected_profile}'?"):
-            self.profile_manager.remove_profile(selected_profile)
-            self.load_profiles()
-            messagebox.showinfo("Success", f"Profile '{selected_profile}' removed.")
+        """
+        This method will now only be called from ProfileManagerWindow.
+        It handles removing a profile via ProfileManager and then
+        requests the ProfileManagerWindow to refresh its display.
+        """
+        # This will be handled by the ProfileManagerWindow's own remove_profile_gui method.
+        pass
 
     def create_hud(self):
         """I'm creating the Heads-Up Display (HUD) elements."""
@@ -198,6 +207,9 @@ class MUDClientApp:
 
         self.connection_label = tk.Label(self.hud_frame, text="Disconnected", bg="#333333", fg="red", font=("Arial", 10, "bold"))
         self.connection_label.pack(side=tk.LEFT, padx=10, pady=5)
+
+        self.current_profile_label = tk.Label(self.hud_frame, text="Profile: N/A", bg="#333333", fg="white", font=("Arial", 10))
+        self.current_profile_label.pack(side=tk.LEFT, padx=10, pady=5)
 
         self.health_label = tk.Label(self.hud_frame, text="Health: N/A", bg="#333333", fg="white", font=("Arial", 10))
         self.health_label.pack(side=tk.LEFT, padx=10, pady=5)
@@ -221,34 +233,34 @@ class MUDClientApp:
                 self.status_message_label.config(text=f"Name: {data['name']}")
 
 
-    def update_connection_status(self, is_connected):
+    def update_connection_status(self, is_connected, profile_name=None):
         """I'm updating the internal connection status and triggering GUI updates."""
         self.connected = is_connected
+        self.current_profile = profile_name if is_connected else None
         self.update_gui_state()
         if not is_connected:
-            # I'm clearing health/status on disconnect.
             self.update_health("N/A") 
             self.status_message_label.config(text="")
 
     def update_gui_state(self):
         """I'm updating GUI element states based on my connection status."""
         if self.connected:
-            self.connect_btn.config(state=tk.DISABLED)
-            self.disconnect_btn.config(state=tk.NORMAL)
+            self.profile_frame.pack_forget() # Hide the profile selection frame
+            self.servers_menu.entryconfig("Connect to Profile...", state=tk.DISABLED)
+            self.servers_menu.entryconfig("Disconnect", state=tk.NORMAL)
+            self.servers_menu.entryconfig("Manage Profiles...", state=tk.DISABLED) # Can't manage while connected
             self.input_entry.config(state=tk.NORMAL)
-            self.profile_listbox.config(state=tk.DISABLED)
-            self.add_btn.config(state=tk.DISABLED)
-            self.remove_btn.config(state=tk.DISABLED)
             self.connection_label.config(text="Connected", fg="green")
+            self.current_profile_label.config(text=f"Profile: {self.current_profile}")
         else:
-            self.connect_btn.config(state=tk.NORMAL)
-            self.disconnect_btn.config(state=tk.DISABLED)
+            self.profile_frame.pack(fill=tk.X, pady=5, expand=False) # Show the profile selection frame
+            self.servers_menu.entryconfig("Connect to Profile...", state=tk.NORMAL)
+            self.servers_menu.entryconfig("Disconnect", state=tk.DISABLED)
+            self.servers_menu.entryconfig("Manage Profiles...", state=tk.NORMAL)
             self.input_entry.config(state=tk.DISABLED)
-            self.profile_listbox.config(state=tk.NORMAL)
-            self.add_btn.config(state=tk.NORMAL)
-            self.remove_btn.config(state=tk.NORMAL)
             self.connection_label.config(text="Not connected", fg="red")
-            self.status_message_label.config(text="Offline") # I'm resetting the status on disconnect.
+            self.current_profile_label.config(text="Profile: N/A")
+            self.status_message_label.config(text="Offline") 
 
     def update_health(self, health):
         """I'm updating the health label in the HUD."""
@@ -351,32 +363,43 @@ class MUDClientApp:
         frame.pack(fill=tk.X, expand=False, padx=5, pady=5, anchor="n")
         return frame
 
-    def connect_to_profile(self):
-        """I'm initiating a connection to the selected MUD profile."""
+    def open_profile_selection_dialog(self):
+        """Opens a dialog to select and connect to a MUD profile."""
         if self.connected:
             messagebox.showwarning("Warning", "I'm already connected. Please disconnect first.")
             return
 
-        selected_index = self.profile_listbox.curselection()
-        if not selected_index:
-            messagebox.showwarning("Warning", "No profile selected. Please add or select a profile.")
+        # Ensure only one dialog instance is open (optional but good practice)
+        if hasattr(self, '_profile_select_dialog') and self._profile_select_dialog.winfo_exists():
+            self._profile_select_dialog.focus_set()
+            self._profile_select_dialog.lift()
             return
-        
-        selected_profile_name = self.profile_listbox.get(selected_index[0])
-        profile = self.profile_manager.profiles.get(selected_profile_name)
+
+        # Pass self (the MUDClientApp instance) so the dialog can call connect_to_profile_internal
+        self._profile_select_dialog = ProfileSelectionDialog(self.root, self.profile_manager, self.connect_to_profile_internal)
+    
+    def connect_to_profile_internal(self, profile_name):
+        """
+        Internal method to initiate connection, called by ProfileSelectionDialog.
+        """
+        if self.connected: # Double-check in case user rapidly clicks
+            messagebox.showwarning("Warning", "I'm already connected.")
+            return
+
+        profile = self.profile_manager.profiles.get(profile_name)
 
         if profile:
             self.display_message(f"--- I'm attempting to connect to {profile['host']}:{profile['port']} ---\n", tags=("system_message",))
             self.status_message_label.config(text="Connecting...")
             
-            connection_thread = threading.Thread(target=self._initiate_connection, args=(profile['host'], profile['port']))
+            connection_thread = threading.Thread(target=self._initiate_connection, args=(profile['host'], profile['port'], profile_name))
             connection_thread.daemon = True
             connection_thread.start()
         else:
             messagebox.showerror("Error", "Selected profile not found. Please reload profiles.")
-            self.load_profiles()
+            self.load_profiles() # This would trigger the profile manager window to refresh if open
 
-    def _initiate_connection(self, host, port):
+    def _initiate_connection(self, host, port, profile_name):
         """This is my internal method to handle the actual socket connection."""
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -390,14 +413,13 @@ class MUDClientApp:
             self.telnet_sub_buffer = b""
 
             # I'm using after(0, ...) to ensure GUI updates happen on the main thread.
-            self.root.after(0, self.update_connection_status, True)
+            self.root.after(0, self.update_connection_status, True, profile_name) # Pass profile name
             self.root.after(0, lambda: self.display_message("--- Connected to MUD ---\n", tags=("system_message", "ansi_32")))
 
             self.receive_thread = threading.Thread(target=self.receive_messages)
             self.receive_thread.daemon = True
             self.receive_thread.start()
 
-            # I'm sending the initial GMCP Client.Core.Supports packet.
             # I'm using after to slightly delay sending the GMCP packet, giving the MUD a moment.
             self.root.after(500, self.send_initial_gmcp_supports)
             
@@ -421,7 +443,6 @@ class MUDClientApp:
             return
         
         try:
-            # I'm attempting a graceful shutdown.
             self.sock.shutdown(socket.SHUT_RDWR)
             self.sock.close()
             logging.info("My socket closed.")
@@ -507,7 +528,7 @@ class MUDClientApp:
                 break
             except Exception as e:
                 logging.exception(f"An unexpected error occurred in my receive_messages: {e}")
-                self.root.after(0, lambda msg_text=f"--- An unexpected error occurred: {e} ---\n": self.display_message(msg_text, tags=("system_message", "ansi_31")))
+                self.root.after(0, lambda msg_text=f"--- An unexpected error occurred: {e}\n": self.display_message(msg_text, tags=("system_message", "ansi_31")))
                 self.root.after(0, self.disconnect)
                 break
         
@@ -757,6 +778,7 @@ class MUDClientApp:
             "Char.Cooldowns": ["1"],   # I'm including Char.Cooldowns.
             "Char.Inventory": ["1"],   # I'm including Char.Inventory.
             "Char.Vitals": ["1"],      # I'm keeping Char.Vitals (most MUDs send this).
+            # I might need to add other modules my MUD might support (e.g., "Comm.Channel", "IRE.Composer").
         }
         self.send_gmcp("Client.Core.Supports", supported_modules)
         logging.info("I sent the Client.Core.Supports GMCP packet with specific modules.")
@@ -767,17 +789,16 @@ class MUDClientApp:
             self.display_message("I'm not connected to the MUD.\n", tags=("system_message", "ansi_31"))
             return
 
-        message = self.input_entry.get()
-        # I'm allowing sending empty lines (just pressing Enter).
-        
+        raw_message = self.input_entry.get() 
         self.input_entry.delete(0, tk.END) 
 
-        # I'm displaying the sent message locally with a distinct tag, always with a newline.
-        self.display_message(f"> {message}\n", tags=("user_input",))
+        message_to_send = self.alias_manager.process_input(raw_message)
+
+        self.display_message(f"> {raw_message}\n", tags=("user_input",))
 
         try:
-            self.sock.sendall((message + "\n").encode('utf-8'))
-            logging.debug(f"I sent: {message!r}") # I'm using !r to clearly show if it's an empty string.
+            self.sock.sendall((message_to_send + "\n").encode('utf-8')) 
+            logging.debug(f"I sent: {message_to_send!r} (originally: {raw_message!r})") 
         except socket.error as e:
             self.display_message(f"An error occurred sending my message: {e}\n", tags=("system_message", "ansi_31"))
             logging.error(f"My socket error sending message: {e}")
@@ -785,6 +806,23 @@ class MUDClientApp:
         except Exception as e:
             self.display_message(f"An unexpected error occurred while I was sending: {e}\n", tags=("system_message", "ansi_31"))
             logging.exception("An unexpected error occurred while I was sending my message")
+
+    def open_alias_manager_window(self):
+        """Opens the Alias Manager window, or brings it to the front if already open."""
+        if self.alias_window is None or not self.alias_window.winfo_exists():
+            self.alias_window = AliasManagerWindow(self.root, self.alias_manager)
+        else:
+            self.alias_window.focus_set()
+            self.alias_window.lift()
+
+    def open_profile_manager_window(self):
+        """Opens the Profile Manager window, or brings it to the front if already open."""
+        # Ensure only one instance is open
+        if self.profile_manager_window is None or not self.profile_manager_window.winfo_exists():
+            self.profile_manager_window = ProfileManagerWindow(self.root, self.profile_manager)
+        else:
+            self.profile_manager_window.focus_set()
+            self.profile_manager_window.lift()
 
 
     def on_closing(self):

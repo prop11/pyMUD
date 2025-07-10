@@ -121,7 +121,7 @@ class MUDClientApp:
         self.tts_queue = queue.Queue()
         self.tts_thread = None
 
-        self.tts_enabled = tk.BooleanVar(value=self.config_manager.get('tts_enabled', False))
+        self.tts_enabled = tk.BooleanVar(value=self.config_manager.get('tts_enabled', True))
         self.tts_read_mud_output = tk.BooleanVar(value=self.config_manager.get('tts_read_mud_output', True))
         self.tts_read_user_input = tk.BooleanVar(value=self.config_manager.get('tts_read_user_input', False))
         self.tts_read_system_messages = tk.BooleanVar(value=self.config_manager.get('tts_read_system_messages', False))
@@ -408,49 +408,98 @@ class MUDClientApp:
 
     def update_hp(self, current_hp, max_hp=None):
         self.root.after(0, lambda: self._update_bar(
-            self.hp_label, self.hp_bar_canvas, self.hp_bar_id,
-            "HP", current_hp, max_hp, "green", "red"
+            self.hp_label, self.hp_bar_canvas, self.hp_bar_id, "HP", current_hp, max_hp, "green", "red"
         ))
 
     def update_sp(self, current_sp, max_sp=None):
         self.root.after(0, lambda: self._update_bar(
-            self.sp_label, self.sp_bar_canvas, self.sp_bar_id,
-            "SP", current_sp, max_sp, "blue", "darkblue"
+            self.sp_label, self.sp_bar_canvas, self.sp_bar_id, "SP", current_sp, max_sp, "blue", "darkblue"
         ))
 
     def _update_bar(self, label_widget, canvas_widget, bar_item_id, stat_name, current_value, max_value, high_color, low_color):
+        # Handle "N/A" as the primary reset signal for all bar values
         if current_value == "N/A":
             label_widget.config(text=f"{stat_name}: N/A")
-            canvas_widget.coords(bar_item_id, 0, 0, 0, 0)
-            canvas_widget.config(bg="darkgrey")
+            canvas_widget.coords(bar_item_id, 0, 0, 0, 0) # Collapse the bar
+            canvas_widget.config(bg="darkgrey") # Grey out background
             return
 
-        current_value_int = int(current_value) if isinstance(current_value, (int, str)) else 0
-        max_value_int = int(max_value) if isinstance(max_value, (int, str)) and max_value is not None else current_value_int
+        current_value_int = 0
+        try:
+            current_value_int = int(current_value)
+        except (ValueError, TypeError):
+            # If current_value can't be converted, default to 0. Log for debugging.
+            logging.debug(f"Non-numeric current_value '{current_value}' for {stat_name}. Defaulting to 0.")
+            current_value_int = 0
 
+        max_value_int = 0
+        if isinstance(max_value, (int, str)):
+            try:
+                # Attempt to convert max_value to int directly
+                max_value_int = int(max_value)
+            except ValueError:
+                # If direct conversion fails (e.g., "N/A", "None N/A", "100 arrows")
+                # Try to extract a numeric prefix for display purposes if it's ammo, otherwise default
+                if stat_name == "Ammo" and isinstance(max_value, str):
+                    # For ammo, if max_value is like "100 arrows", extract 100 for bar calculation
+                    match = re.match(r'(\d+)', max_value)
+                    if match:
+                        max_value_int = int(match.group(1))
+                    else:
+                        # If no number found in max_value string, use current_value for calculation
+                        # This avoids ZeroDivisionError if current_value is positive.
+                        max_value_int = current_value_int if current_value_int > 0 else 1
+                else:
+                    # For other stats, if max_value is non-numeric, default to current_value_int
+                    max_value_int = current_value_int if current_value_int > 0 else 1 # Ensure non-zero for division
+            except TypeError:
+                # Handle cases where max_value might be e.g., None, if it wasn't caught earlier.
+                max_value_int = current_value_int if current_value_int > 0 else 1
+        elif max_value is None: # Explicitly handle None if it makes it here
+            max_value_int = current_value_int if current_value_int > 0 else 1
+        
+        # Ensure max_value_int is never zero if current_value_int is positive, to prevent ZeroDivisionError.
+        if max_value_int == 0 and current_value_int > 0:
+            max_value_int = current_value_int
+        elif max_value_int == 0 and current_value_int == 0:
+            max_value_int = 1 # Avoid ZeroDivisionError if both are 0.
+
+        # Update label text
+        label_text = f"{stat_name}: {current_value_int}"
         if stat_name == "Ammo":
-            label_text = f"{stat_name}: {current_value}"
-            if max_value is not None and max_value != "N/A":
-                label_text += f"/{max_value}"
-            label_widget.config(text=label_text)
+            # For Ammo, the label should show the full string if max_value was a string like "100 arrows"
+            if isinstance(max_value, str) and not str(max_value).isdigit() and max_value != "N/A":
+                label_text = f"{stat_name}: {current_value} {max_value}"
+            elif max_value is not None and max_value != "N/A":
+                # If max_value was purely numeric, append it as /max_value
+                label_text += f"/{max_value_int}"
         else:
-            label_widget.config(text=f"{stat_name}: {current_value_int}/{max_value_int}")
+            # For HP/SP, always show current/max format
+            label_text += f"/{max_value_int}"
+
+        label_widget.config(text=label_text)
 
         bar_width = canvas_widget.winfo_width()
         if bar_width <= 1:
-             bar_width = 150
+             bar_width = 150 # Default width if not yet rendered
+
+        # Calculate fill width and color
+        fill_width = 0
+        fill_color = low_color if current_value_int > 0 else "grey" # Default color if no progress
 
         if max_value_int > 0:
             fill_width = (current_value_int / max_value_int) * bar_width
-
             percentage = (current_value_int / max_value_int) * 100
-            fill_color = high_color
 
             if stat_name == "HP":
                 if percentage <= 20:
-                    fill_color = low_color
+                    fill_color = "red"
                 elif percentage <= 50:
                     fill_color = "orange"
+                else:
+                    fill_color = "green"
+            elif stat_name == "SP":
+                fill_color = "blue" # SP remains blue
             elif stat_name == "Ammo":
                  if percentage <= 20:
                     fill_color = "red"
@@ -458,17 +507,13 @@ class MUDClientApp:
                     fill_color = "darkorange"
                  else:
                     fill_color = "gold"
-        else:
-            fill_width = 0
-            fill_color = low_color if current_value_int > 0 else "grey"
-
+        
         canvas_widget.coords(bar_item_id, 0, 0, fill_width, canvas_widget.winfo_height())
         canvas_widget.itemconfig(bar_item_id, fill=fill_color)
-        canvas_widget.config(bg="black")
+        canvas_widget.config(bg="black") # Ensure background is black
 
     def update_ammo(self, count, ammo_type="N/A", max_ammo=None):
         display_max_ammo = f"{max_ammo} {ammo_type}" if max_ammo is not None else ammo_type
-
         self.root.after(0, lambda: self._update_bar(
             self.ammo_label, self.ammo_bar_canvas, self.ammo_bar_id,
             "Ammo", count, display_max_ammo, "gold", "red"
@@ -479,9 +524,7 @@ class MUDClientApp:
 
     def display_message(self, message, tags=None):
         self.output_text.config(state=tk.NORMAL)
-
         clean_text_for_tts = []
-
         parts = self.ANSI_ESCAPE_PATTERN.split(message)
 
         for i in range(len(parts)):
@@ -665,6 +708,7 @@ class MUDClientApp:
             self.receive_thread.start()
 
             self.root.after(500, self.send_initial_gmcp_supports)
+            self.root.after(1000, self.request_char_gmcp) # Added call to request character data
 
         except socket.timeout:
             self.root.after(0, lambda: self.display_message("Connection timed out.\n", tags=("system_message", "ansi_31")))
@@ -944,11 +988,24 @@ class MUDClientApp:
     def send_initial_gmcp_supports(self):
         supported_modules = {
             "Client.Core": ["1", "2"],
-            "Room": ["1"],
-            "Char": ["1"],
+            "Room.Info": ["1"],
+            "Char.Buffs": ["1"],
+            "Char.Status": ["1"],
+            "Char.Cooldowns": ["1"],
+            "Char.Inventory": ["1"],
+            "Char.Vitals": ["1"],
+            "Char.Items.Inv": ["1"],
+            "Char.Items.Equip": ["1"],
         }
         self.send_gmcp("Client.Core.Supports", supported_modules)
         # logging.info("Sent the Client.Core.Supports GMCP packet with specific modules.") # Removed, less critical
+
+    def request_char_gmcp(self):
+        """Sends GMCP requests to get current character vitals, status, and equipped items."""
+        logging.info("Requesting Char.Vitals, Char.Status, and Char.Items.Equip via GMCP.")
+        self.send_gmcp("Char.Vitals")
+        self.send_gmcp("Char.Status")
+        self.send_gmcp("Char.Items.Equip")
 
     def send_message(self, event=None):
         if not self.connected or not self.sock:

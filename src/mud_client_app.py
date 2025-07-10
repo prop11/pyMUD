@@ -121,7 +121,7 @@ class MUDClientApp:
         self.tts_queue = queue.Queue()
         self.tts_thread = None
 
-        self.tts_enabled = tk.BooleanVar(value=self.config_manager.get('tts_enabled', True))
+        self.tts_enabled = tk.BooleanVar(value=self.config_manager.get('tts_enabled', False))
         self.tts_read_mud_output = tk.BooleanVar(value=self.config_manager.get('tts_read_mud_output', True))
         self.tts_read_user_input = tk.BooleanVar(value=self.config_manager.get('tts_read_user_input', False))
         self.tts_read_system_messages = tk.BooleanVar(value=self.config_manager.get('tts_read_system_messages', False))
@@ -944,14 +944,8 @@ class MUDClientApp:
     def send_initial_gmcp_supports(self):
         supported_modules = {
             "Client.Core": ["1", "2"],
-            "Room.Info": ["1"],
-            "Char.Buffs": ["1"],
-            "Char.Status": ["1"],
-            "Char.Cooldowns": ["1"],
-            "Char.Inventory": ["1"],
-            "Char.Vitals": ["1"],
-            "Char.Items.Inv": ["1"],
-            "Char.Items.Equip": ["1"],
+            "Room": ["1"],
+            "Char": ["1"],
         }
         self.send_gmcp("Client.Core.Supports", supported_modules)
         # logging.info("Sent the Client.Core.Supports GMCP packet with specific modules.") # Removed, less critical
@@ -966,7 +960,7 @@ class MUDClientApp:
         self.input_entry.delete(0, tk.END)
 
         if self.tts_engine and self.tts_enabled.get() and self.tts_read_user_input.get():
-            self.tts_engine.stop()
+            # REMOVED: self.tts_engine.stop()  <--- This was clearing the queue.
             logging.debug(f"Queuing user input for TTS: 'You said: {raw_message}'")
             self.tts_queue.put(f"You said: {raw_message}")
 

@@ -1,78 +1,101 @@
-# src/mud_client_app.py
-
 import tkinter as tk
 from tkinter import messagebox, simpledialog, scrolledtext
-from src.profile_manager import ProfileManager # Correct import for src.profile_manager
+from src.profile_manager import ProfileManager
 import socket
 import threading
 import re
 import json
 import logging
-import os # For path manipulation and directory checks
-import importlib.util # For dynamic module loading
-import sys # For managing sys.path
+import os
+import importlib.util
+import sys
+import time
 
-# Configure basic logging for the entire application
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# I'm setting the logging level to DEBUG for thorough analysis.
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class MUDClientApp:
     """
-    A basic Tkinter-based MUD client application with profile management and mod loading.
+    My Tkinter-based MUD client application, featuring profile management,
+    mod loading, and robust Telnet/GMCP parsing.
     """
 
-    # ANSI color codes to Tkinter tag mapping for text output
+    # My mappings for ANSI color codes to Tkinter text tags.
     ANSI_COLOR_MAP = {
         0: 'white', # Reset/Default
         30: 'black', 31: 'red', 32: 'green', 33: 'yellow',
         34: 'blue', 35: 'magenta', 36: 'cyan', 37: 'white', # Standard ANSI colors
         90: 'gray', 91: 'firebrick', 92: 'forestgreen', 93: 'gold',
-        94: 'dodgerblue', 95: 'violet', 96: 'lightskyblue', 97: 'white' # Bright ANSI colors
+        94: 'dodgerblue', 95: 'dodgerblue', 96: 'lightskyblue', 97: 'white' # Bright ANSI colors
     }
     
-    # Regular expression to find ANSI escape sequences
+    # My regular expression to find ANSI escape sequences.
     ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[([0-9;]*)m')
     
-    # Regular expression to remove Telnet IAC (Interpret As Command) sequences
-    # This prevents control characters from showing up in the output
-    TELNET_IAC_PATTERN = re.compile(rb'\xff[\xfb-\xfe][\x01-\xff]|\xff\xf0|\xff\xfa[\x01-\xff]*?\xff\xf0')
+    # --- My Telnet Protocol Constants ---
+    # IAC (Interpret As Command)
+    IAC = b'\xff'
+    # Telnet Commands
+    DONT = b'\xfe'
+    DO = b'\xfd'
+    WONT = b'\xfc'
+    WILL = b'\xfb'
+    SB = b'\xfa' # Subnegotiation Begin
+    SE = b'\xf0' # Subnegotiation End
+    # Other common IAC bytes (often sent alone or in simple sequences)
+    NOP = b'\xf9' # No Operation
+    GA = b'\xf9' # Go Ahead (often the same byte as NOP)
 
+    # My Telnet Options
+    ECHO = b'\x01' # 1
+    SUPPRESS_GO_AHEAD = b'\x03' # 3
+    NAWS = b'\x1f' # 31 (Negotiate About Window Size)
+    GMCP = b'\xc9' # 201 (Generic Mud Communication Protocol - Standard Negotiation Byte)
+    # MY CRITICAL CHANGE: INCLUDING 'E' AND ENSURING THE OPTION BYTE IS KEPT FOR GMCP DATA
+    GMCP_DATA_OPTIONS = (b'R', b'C', b'E') # 82, 67, 69 (MY SUSPECTED GMCP DATA BYTES FOR THIS MUD - FOR TESTING!) 
+    
+    # My states for the Telnet parser.
+    STATE_NORMAL = 0           # Default state, processing normal text
+    STATE_IAC = 1              # Received an IAC byte, expecting a command
+    STATE_SB_READ_OPTION = 2   # Received IAC SB, waiting for the option byte
+    STATE_GMCP_SUB = 3         # Inside a GMCP subnegotiation, accumulating GMCP payload
+    STATE_UNKNOWN_SB = 4       # Inside an unknown subnegotiation, consuming bytes until IAC SE
 
     def __init__(self, root):
-        """Initializes the MUD Client Application."""
+        """I'm initializing my MUD Client Application."""
         self.root = root
-        self.root.title("Python MUD Client") # Set window title
+        self.root.title("Python MUD Client")
 
-        # Initialize profile manager
         self.profile_manager = ProfileManager() 
 
-        # Connection state variables
         self.sock = None
         self.receive_thread = None
-        self.connected = False
-        self.loaded_mods = [] # List to store references to successfully loaded mod modules
+        self.connected = False # This will be set by my update_connection_status method.
 
-        # Setup GUI elements
+        self.loaded_mods = [] 
+        self.gmcp_listeners = [] # This list will hold my GMCP callback functions.
+
+        # --- My Telnet Parsing State Variables ---
+        self.telnet_buffer = b"" # My buffer for raw incoming bytes from the socket.
+        self.telnet_parser_state = self.STATE_NORMAL
+        self.telnet_sub_buffer = b"" # My buffer for data within a subnegotiation block.
+
         self.setup_gui()
-        self.create_hud() # Heads-Up Display
-        self.define_text_tags() # Define special text tags for coloring
+        self.create_hud()
+        self.define_text_tags()
+        self.load_mods() # I'll load my mods after the GUI is set up.
 
-        # Load user mods
-        self.load_mods() # Call load_mods here after GUI is set up to integrate mod UIs
+        # I'm registering my client's own HUD as a GMCP listener.
+        self.register_gmcp_listener(self._update_client_hud_from_gmcp)
 
-        # Update initial GUI state based on connection status
-        self.update_gui_state()
-
-        # Handle window closing event
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.update_gui_state() # I'll set the initial GUI state based on my connection status.
+        self.root.protocol("WM_WM_DELETE_WINDOW", self.on_closing)
 
     def setup_gui(self):
-        """Sets up the main graphical user interface elements."""
-        # Main content frame to hold everything except potential right-side mods
-        # This frame takes up the left and center part of the window
+        """I'm setting up the main graphical user interface elements."""
         main_content_frame = tk.Frame(self.root)
         main_content_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Profile management frame (top-left)
         profile_frame = tk.Frame(main_content_frame)
         profile_frame.pack(fill=tk.X, pady=5, expand=False)
 
@@ -88,9 +111,8 @@ class MUDClientApp:
         self.remove_btn = tk.Button(profile_btn_frame, text="Remove Profile", command=self.remove_profile)
         self.remove_btn.pack(fill=tk.X, pady=2)
         
-        self.load_profiles() # Populate the listbox with saved profiles
+        self.load_profiles()
 
-        # Connect/Disconnect buttons frame (below profiles)
         connect_disconnect_frame = tk.Frame(main_content_frame)
         connect_disconnect_frame.pack(fill=tk.X, pady=2, expand=False)
 
@@ -100,56 +122,52 @@ class MUDClientApp:
         self.disconnect_btn = tk.Button(connect_disconnect_frame, text="Disconnect", command=self.disconnect)
         self.disconnect_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
 
-        # Main output text area with scrollbar (center)
         text_frame = tk.Frame(main_content_frame)
         text_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
         self.output_text = scrolledtext.ScrolledText(text_frame, state=tk.DISABLED, wrap=tk.WORD, bg="black", fg="white", font=("Courier New", 10))
         self.output_text.pack(fill=tk.BOTH, expand=True)
 
-        # Input entry field (bottom-left)
         self.input_entry = tk.Entry(main_content_frame)
         self.input_entry.pack(fill=tk.X, expand=False, pady=(0,5))
-        self.input_entry.bind("<Return>", self.send_message) # Send message on Enter key press
+        self.input_entry.bind("<Return>", self.send_message)
 
-        # NEW: Frame for mods on the right side of the main window
-        self.mod_container_frame = tk.Frame(self.root, bd=2, relief=tk.GROOVE) # Border and relief for visual separation
+        # Mod container frame on the right side
+        self.mod_container_frame = tk.Frame(self.root, bd=2, relief=tk.GROOVE)
         self.mod_container_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5, expand=False) 
 
         self.mod_label = tk.Label(self.mod_container_frame, text="Loaded Mods", font=("Arial", 10, "bold"), bg=self.mod_container_frame.cget('bg'))
         self.mod_label.pack(side=tk.TOP, pady=5)
 
     def define_text_tags(self):
-        """Defines custom text tags for the output text widget."""
+        """I'm defining custom text tags for the output text widget."""
         self.output_text.tag_config("default", foreground="white", background="black")
 
-        # Configure tags for ANSI colors
         for code, color_name in self.ANSI_COLOR_MAP.items():
             self.output_text.tag_config(f"ansi_{code}", foreground=color_name)
         
-        # Tag for system messages (e.g., connection status)
         self.output_text.tag_config("system_message", foreground="lightgray", font=("TkDefaultFont", 10, "italic"))
 
     def load_profiles(self):
-        """Loads profiles from ProfileManager into the listbox."""
-        self.profile_listbox.delete(0, tk.END) # Clear existing items
+        """I'm loading profiles from ProfileManager into the listbox."""
+        self.profile_listbox.delete(0, tk.END)
         for profile_name in self.profile_manager.profiles:
-            self.profile_listbox.insert(tk.END, profile_name) # Insert each profile name
+            self.profile_listbox.insert(tk.END, profile_name)
         if self.profile_manager.profiles:
-            self.profile_listbox.selection_set(0) # Select the first profile by default if any exist
+            self.profile_listbox.selection_set(0)
 
     def add_profile(self):
-        """Prompts user for new profile details and adds it via ProfileManager."""
+        """I'm prompting the user for new profile details and adding it via ProfileManager."""
         name = simpledialog.askstring("Profile Name", "Enter profile name:")
-        if not name: return # User cancelled
+        if not name: return
         if name in self.profile_manager.profiles:
             messagebox.showerror("Error", "Profile with this name already exists.")
             return
         host = simpledialog.askstring("Host", "Enter host address:")
-        if not host: return # User cancelled
+        if not host: return
         try:
             port = simpledialog.askinteger("Port", "Enter port number:")
-            if port is None: return # User cancelled
+            if port is None: return
             if not (1 <= port <= 65535):
                 messagebox.showerror("Error", "Port must be between 1 and 65535.")
                 return
@@ -158,11 +176,11 @@ class MUDClientApp:
             return
 
         self.profile_manager.add_profile(name, host, port)
-        self.load_profiles() # Refresh listbox to show the new profile
+        self.load_profiles()
         messagebox.showinfo("Success", f"Profile '{name}' added.")
 
     def remove_profile(self):
-        """Removes the selected profile via ProfileManager."""
+        """I'm removing the selected profile via ProfileManager."""
         selected_index = self.profile_listbox.curselection()
         if not selected_index:
             messagebox.showwarning("Warning", "No profile selected to remove.")
@@ -170,12 +188,12 @@ class MUDClientApp:
         selected_profile = self.profile_listbox.get(selected_index[0])
         if messagebox.askyesno("Confirm Remove", f"Are you sure you want to remove '{selected_profile}'?"):
             self.profile_manager.remove_profile(selected_profile)
-            self.load_profiles() # Refresh listbox
+            self.load_profiles()
             messagebox.showinfo("Success", f"Profile '{selected_profile}' removed.")
 
     def create_hud(self):
-        """Creates the Heads-Up Display (HUD) elements."""
-        self.hud_frame = tk.Frame(self.root, bg="#333333") # Dark background for the HUD
+        """I'm creating the Heads-Up Display (HUD) elements."""
+        self.hud_frame = tk.Frame(self.root, bg="#333333")
         self.hud_frame.pack(side=tk.TOP, fill=tk.X, expand=False) 
 
         self.connection_label = tk.Label(self.hud_frame, text="Disconnected", bg="#333333", fg="red", font=("Arial", 10, "bold"))
@@ -187,8 +205,33 @@ class MUDClientApp:
         self.status_message_label = tk.Label(self.hud_frame, text="", bg="#333333", fg="lightblue", font=("Arial", 10))
         self.status_message_label.pack(side=tk.RIGHT, padx=10, pady=5)
 
+    def _update_client_hud_from_gmcp(self, package_name, data):
+        """I'm updating my client's built-in HUD labels based on GMCP data."""
+        logging.debug(f"Client HUD Listener: Received GMCP - Package: {package_name}, Data: {data}")
+        # Now expecting "Char.Vitals" or "Char.Status" correctly
+        if package_name == "Char.Vitals":
+            if 'hp' in data and 'maxhp' in data:
+                self.update_health(f"{data['hp']}/{data['maxhp']}")
+            elif 'hp' in data:
+                self.update_health(f"{data['hp']}")
+        elif package_name == "Char.Status":
+            if 'hp' in data and 'maxhp' in data: # Most MUDs send vitals here too
+                self.update_health(f"{data['hp']}/{data['maxhp']}")
+            if 'name' in data: # Example: Display character name in status area
+                self.status_message_label.config(text=f"Name: {data['name']}")
+
+
+    def update_connection_status(self, is_connected):
+        """I'm updating the internal connection status and triggering GUI updates."""
+        self.connected = is_connected
+        self.update_gui_state()
+        if not is_connected:
+            # I'm clearing health/status on disconnect.
+            self.update_health("N/A") 
+            self.status_message_label.config(text="")
+
     def update_gui_state(self):
-        """Updates GUI element states based on connection status."""
+        """I'm updating GUI element states based on my connection status."""
         if self.connected:
             self.connect_btn.config(state=tk.DISABLED)
             self.disconnect_btn.config(state=tk.NORMAL)
@@ -197,7 +240,6 @@ class MUDClientApp:
             self.add_btn.config(state=tk.DISABLED)
             self.remove_btn.config(state=tk.DISABLED)
             self.connection_label.config(text="Connected", fg="green")
-            self.status_message_label.config(text="Online")
         else:
             self.connect_btn.config(state=tk.NORMAL)
             self.disconnect_btn.config(state=tk.DISABLED)
@@ -206,29 +248,113 @@ class MUDClientApp:
             self.add_btn.config(state=tk.NORMAL)
             self.remove_btn.config(state=tk.NORMAL)
             self.connection_label.config(text="Not connected", fg="red")
-            self.status_message_label.config(text="Offline")
-
-    def update_connection_status(self, connected):
-        """Updates the internal connection status and triggers GUI update."""
-        self.connected = connected
-        self.update_gui_state()
+            self.status_message_label.config(text="Offline") # I'm resetting the status on disconnect.
 
     def update_health(self, health):
-        """Updates the health label in the HUD."""
+        """I'm updating the health label in the HUD."""
         self.root.after(0, lambda: self.health_label.config(text=f"Health: {health}"))
 
-    def display_message(self, message, tags=None):
-        """Appends a message to the output text area."""
-        self.output_text.config(state=tk.NORMAL) # Enable editing temporarily
-        self.output_text.insert(tk.END, message, tags if tags is not None else "default")
-        self.output_text.insert(tk.END, "\n") # Add newline after message
-        self.output_text.config(state=tk.DISABLED) # Disable editing
-        self.output_text.yview(tk.END) # Scroll to the end
+
+    def display_message(self, message, tags=None): 
+        """
+        I'm appending a message to the output text area, handling ANSI codes.
+        This function does NOT automatically add newlines. Newlines must be
+        part of the 'message' string if desired.
+        """
+        self.output_text.config(state=tk.NORMAL)
+        
+        current_fg_tag = "default"
+
+        # I'm splitting the message by ANSI escape codes.
+        parts = self.ANSI_ESCAPE_PATTERN.split(message)
+        
+        for i in range(len(parts)):
+            if i % 2 == 0:
+                text_to_display = parts[i]
+                if text_to_display:
+                    self.output_text.insert(tk.END, text_to_display, current_fg_tag)
+            else:
+                codes_str = parts[i]
+                if codes_str:
+                    codes = [int(c) for c in codes_str.split(';') if c]
+
+                    for code in codes:
+                        if code == 0: # Reset code
+                            current_fg_tag = "default"
+                        elif 30 <= code <= 37 or 90 <= code <= 97: # Standard and bright foregrounds
+                            if code in self.ANSI_COLOR_MAP:
+                                current_fg_tag = f"ansi_{code}"
+                        # I'd extend this with background colors (40-47, 100-107), bold (1), etc. as needed.
+
+        self.output_text.config(state=tk.DISABLED)
+        self.output_text.yview(tk.END)
+
+    def register_gmcp_listener(self, callback):
+        """
+        I'm registering a callback function to receive parsed GMCP data.
+        The callback should accept two arguments: package_name (str) and data (dict).
+        """
+        if callable(callback):
+            self.gmcp_listeners.append(callback)
+            logging.info(f"GMCP listener registered: {callback.__name__}")
+        else:
+            logging.warning(f"I attempted to register a non-callable GMCP listener: {callback}")
+            
+    def load_mods(self):
+        """I'm loading Python modules from the 'mods' directory."""
+        mods_dir = "mods"
+        if not os.path.exists(mods_dir):
+            logging.warning(f"My mods directory '{mods_dir}' was not found. I'm creating it.")
+            os.makedirs(mods_dir) # I'll create the directory if it doesn't exist.
+            return
+
+        # I'm adding the mods directory to the Python path temporarily for importlib.
+        sys.path.insert(0, mods_dir) 
+
+        for filename in os.listdir(mods_dir):
+            if filename.endswith(".py") and not filename.startswith("__"): # I'm skipping __init__.py and other special files.
+                module_name = filename[:-3] # I'm removing the .py extension.
+                try:
+                    spec = importlib.util.spec_from_file_location(module_name, os.path.join(mods_dir, filename))
+                    if spec is None:
+                        logging.error(f"I could not get the spec for mod: {filename}")
+                        continue
+                    
+                    mod = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = mod # I'm adding it to sys.modules to prevent re-import issues.
+                    spec.loader.exec_module(mod) # I'm executing the module to define its contents.
+
+                    # I'm checking if the mod has the required setup_mod_gui function.
+                    if hasattr(mod, 'setup_mod_gui') and callable(mod.setup_mod_gui):
+                        # I'm creating a dedicated frame for this mod's GUI.
+                        mod_frame = self.create_mod_frame(module_name)
+                        # I'm calling the mod's setup function, passing its frame and client app instance.
+                        mod.setup_mod_gui(mod_frame, self) 
+                        self.loaded_mods.append(mod) # I'm keeping a reference to the loaded mod module.
+                        logging.info(f"My mod '{module_name}' loaded successfully.")
+                    else:
+                        logging.warning(f"My mod '{module_name}' does not have a callable 'setup_mod_gui' function.")
+
+                except Exception as e:
+                    logging.error(f"An error occurred loading my mod '{module_name}': {e}")
+                    logging.exception(f"Detailed error for my mod '{module_name}'")
+        
+        # I'm removing the mods directory from the Python path after loading.
+        sys.path.pop(0) 
+
+    def create_mod_frame(self, mod_name):
+        """I'm creating a labeled frame for a mod's GUI elements within the mod container."""
+        # I'll clean up the mod name for display (e.g., "gmcp_hud_mod" -> "Gmcp Hud Mod").
+        display_name = mod_name.replace('_', ' ').title()
+        frame = tk.LabelFrame(self.mod_container_frame, text=display_name, padx=5, pady=5)
+        # I'm packing frames vertically within the mod_container_frame.
+        frame.pack(fill=tk.X, expand=False, padx=5, pady=5, anchor="n")
+        return frame
 
     def connect_to_profile(self):
-        """Initiates connection to the selected MUD profile."""
+        """I'm initiating a connection to the selected MUD profile."""
         if self.connected:
-            messagebox.showwarning("Warning", "Already connected. Please disconnect first.")
+            messagebox.showwarning("Warning", "I'm already connected. Please disconnect first.")
             return
 
         selected_index = self.profile_listbox.curselection()
@@ -240,290 +366,437 @@ class MUDClientApp:
         profile = self.profile_manager.profiles.get(selected_profile_name)
 
         if profile:
-            self.display_message(f"--- Attempting to connect to {profile['host']}:{profile['port']} ---", tags=("system_message",))
+            self.display_message(f"--- I'm attempting to connect to {profile['host']}:{profile['port']} ---\n", tags=("system_message",))
             self.status_message_label.config(text="Connecting...")
             
-            # Start connection in a separate thread to keep GUI responsive
             connection_thread = threading.Thread(target=self._initiate_connection, args=(profile['host'], profile['port']))
-            connection_thread.daemon = True # Allow app to exit even if thread is running
+            connection_thread.daemon = True
             connection_thread.start()
         else:
             messagebox.showerror("Error", "Selected profile not found. Please reload profiles.")
-            self.load_profiles() # Reload profiles in case file changed
+            self.load_profiles()
 
     def _initiate_connection(self, host, port):
-        """Internal method to handle the actual socket connection."""
+        """This is my internal method to handle the actual socket connection."""
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.settimeout(5) # Short timeout for initial connection
+            self.sock.settimeout(5) # I'm setting a timeout for initial connection.
             self.sock.connect((host, port))
-            self.sock.settimeout(None) # Remove timeout after connection for blocking recv
+            self.sock.settimeout(None) # I'll remove the timeout after connection (or set to a short timeout for the receive loop).
+            
+            # I'm resetting the Telnet parser state for a new connection.
+            self.telnet_buffer = b""
+            self.telnet_parser_state = self.STATE_NORMAL
+            self.telnet_sub_buffer = b""
 
-            # Update GUI on main thread
+            # I'm using after(0, ...) to ensure GUI updates happen on the main thread.
             self.root.after(0, self.update_connection_status, True)
-            self.root.after(0, lambda: self.display_message("--- Connected to MUD ---", tags=("system_message", "ansi_32")))
+            self.root.after(0, lambda: self.display_message("--- Connected to MUD ---\n", tags=("system_message", "ansi_32")))
 
-            # Start receiving messages in a separate thread
             self.receive_thread = threading.Thread(target=self.receive_messages)
             self.receive_thread.daemon = True
             self.receive_thread.start()
+
+            # I'm sending the initial GMCP Client.Core.Supports packet.
+            # I'm using after to slightly delay sending the GMCP packet, giving the MUD a moment.
+            self.root.after(500, self.send_initial_gmcp_supports)
             
         except socket.timeout:
-            self.root.after(0, lambda: self.display_message("Connection timed out.", tags=("system_message", "ansi_31")))
+            self.root.after(0, lambda: self.display_message("My connection timed out.\n", tags=("system_message", "ansi_31")))
             self.root.after(0, self.update_connection_status, False)
-            logging.error(f"Connection timed out to {host}:{port}")
+            logging.error(f"My connection timed out to {host}:{port}")
         except socket.error as e:
-            self.root.after(0, lambda msg_text=f"Connection error: {e}": self.display_message(msg_text, tags=("system_message", "ansi_31")))
+            self.root.after(0, lambda msg_text=f"My connection error: {e}\n": self.display_message(msg_text, tags=("system_message", "ansi_31")))
             self.root.after(0, self.update_connection_status, False)
-            logging.error(f"Socket error connecting to {host}:{port}: {e}")
+            logging.error(f"My socket error connecting to {host}:{port}: {e}")
         except Exception as e:
-            self.root.after(0, lambda msg_text=f"An unexpected error occurred during connection: {e}": self.display_message(msg_text, tags=("system_message", "ansi_31")))
+            self.root.after(0, lambda msg_text=f"An unexpected error occurred during my connection: {e}\n": self.display_message(msg_text, tags=("system_message", "ansi_31")))
             self.root.after(0, self.update_connection_status, False)
-            logging.exception("Unexpected error during connection")
+            logging.exception("An unexpected error occurred during my connection")
 
     def disconnect(self):
-        """Disconnects from the MUD."""
+        """I'm disconnecting from the MUD."""
         if not self.connected or not self.sock:
-            logging.info("Attempted to disconnect when not connected.")
+            logging.info("I attempted to disconnect when not connected.")
             return
         
         try:
-            # Attempt to gracefully shut down the socket
+            # I'm attempting a graceful shutdown.
             self.sock.shutdown(socket.SHUT_RDWR)
             self.sock.close()
-            logging.info("Socket closed.")
+            logging.info("My socket closed.")
         except socket.error as e:
-            logging.warning(f"Error during socket shutdown/close: {e}")
+            logging.warning(f"An error occurred during my socket shutdown/close: {e}")
         except Exception as e:
-            logging.warning(f"Unexpected error during disconnect: {e}")
+            logging.warning(f"An unexpected error occurred during my disconnect: {e}")
         finally:
             self.sock = None
-            self.receive_thread = None # Clear thread reference
-            self.root.after(0, self.update_connection_status, False) # Update GUI
-            self.root.after(0, lambda: self.display_message("--- Disconnected from MUD ---", tags=("system_message", "ansi_31")))
+            self.receive_thread = None
+            self.root.after(0, self.update_connection_status, False)
+            self.root.after(0, lambda: self.display_message("--- Disconnected from MUD ---\n", tags=("system_message", "ansi_31")))
 
     def receive_messages(self):
-        """Receives and processes messages from the MUD server."""
-        buffer = b"" # Buffer to hold incomplete messages
+        """
+        I'm receiving raw byte messages from the MUD server, appending them to a buffer,
+        and then processing the buffer using my Telnet parser.
+        I'm accumulating processed text into line_buffer for display.
+        """
+        line_buffer = "" # I'll accumulate partial lines here for display.
+        # I'm setting a short timeout for the socket's receive operation to allow periodic flushing.
+        self.sock.settimeout(0.1) # 100 milliseconds timeout
+
         while self.connected:
             try:
-                # Receive data in chunks
-                message_bytes = self.sock.recv(4096)
-
-                if not message_bytes:
-                    # Server closed the connection
-                    logging.info("Server disconnected gracefully.")
-                    self.root.after(0, lambda: self.display_message("--- Server disconnected unexpectedly ---", tags=("system_message", "ansi_31")))
+                received_bytes = self.sock.recv(4096)
+                if not received_bytes:
+                    logging.info("The server disconnected gracefully.")
+                    self.root.after(0, lambda: self.display_message("--- The server disconnected unexpectedly ---\n", tags=("system_message", "ansi_31")))
                     self.root.after(0, self.disconnect)
-                    break # Exit receive loop
+                    break
                 
-                buffer += message_bytes # Add received bytes to buffer
+                self.telnet_buffer += received_bytes
                 
-                # Remove Telnet IAC sequences before decoding
-                processed_buffer = self.TELNET_IAC_PATTERN.sub(b'', buffer)
-
-                try:
-                    # Attempt to decode as UTF-8 (common for modern MUDs)
-                    message = processed_buffer.decode('utf-8')
-                    buffer = b"" # Clear buffer if successful
-                except UnicodeDecodeError:
-                    # Fallback to Latin-1 if UTF-8 fails (common for older MUDs/special chars)
-                    message = processed_buffer.decode('latin-1', errors='replace')
-                    buffer = b"" # Clear buffer if successful
-                    logging.warning("UnicodeDecodeError encountered, falling back to latin-1 for display.")
-
-                if message:
-                    # Process and display message on main thread
-                    self.root.after(0, self.parse_and_display_message, message)
-                    # Attempt to parse GMCP for HUD updates
-                    self.root.after(0, self.parse_gmcp_and_hud, message)
-            
-            except socket.timeout:
-                # This should ideally not happen if timeout is None, but good to handle
-                pass
-            except socket.error as e:
-                # Handle socket errors (e.g., connection reset by peer)
-                if self.connected: # Only log/disconnect if we were actively connected
-                    logging.error(f"Socket error in receive_messages: {e}")
-                    self.root.after(0, lambda msg_text=f"--- Network error: {e} ---": self.display_message(msg_text, tags=("system_message", "ansi_31")))
-                    self.root.after(0, self.disconnect)
-                break # Exit receive loop
-            except Exception as e:
-                # Catch any other unexpected errors
-                logging.exception(f"An unexpected error occurred in receive_messages: {e}")
-                self.root.after(0, lambda msg_text=f"--- An unexpected error occurred: {e} ---": self.display_message(msg_text, tags=("system_message", "ansi_31")))
-                self.root.after(0, self.disconnect)
-                break # Exit receive loop
-
-    def parse_and_display_message(self, message):
-        """Parses ANSI escape codes and displays colored text in the output area."""
-        self.output_text.config(state=tk.NORMAL)
-        
-        current_fg_tag = "default" # Start with default color
-
-        # Split message by ANSI escape sequences
-        parts = self.ANSI_ESCAPE_PATTERN.split(message)
-        
-        for i in range(len(parts)):
-            if i % 2 == 0:
-                # This is plain text
-                text_to_display = parts[i]
-                if text_to_display:
-                    self.output_text.insert(tk.END, text_to_display, current_fg_tag)
-            else:
-                # This is an ANSI code string (e.g., "31;1" or "0")
-                codes_str = parts[i]
-                if codes_str:
-                    codes = [int(c) for c in codes_str.split(';') if c]
-
-                    for code in codes:
-                        if code == 0: # Reset code
-                            current_fg_tag = "default"
-                        elif code in self.ANSI_COLOR_MAP:
-                            current_fg_tag = f"ansi_{code}" # Apply specific color tag
-        
-        self.output_text.insert(tk.END, "\n") # Always add a newline at the end of each message
-        self.output_text.config(state=tk.DISABLED)
-        self.output_text.yview(tk.END) # Scroll to the bottom
-
-    def parse_gmcp_and_hud(self, message):
-        """
-        Attempts to parse GMCP (Generic MUD Communication Protocol) messages
-        to update HUD elements. This is a very basic example.
-        """
-        if "GMCP" in message:
-            try:
-                gmcp_start_index = message.find("GMCP ")
-                if gmcp_start_index != -1:
-                    # Extract the GMCP payload (e.g., "Char.Vitals {"hp": 100}")
-                    gmcp_payload = message[gmcp_start_index + len("GMCP "):].strip()
+                # I'm iterating through (text_chunk, is_prompt_signal) tuples.
+                for text_chunk, is_prompt_signal in self._parse_telnet_stream_for_display_and_gmcp():
+                    line_buffer += text_chunk
                     
-                    # Split into package name and JSON string
-                    parts = gmcp_payload.split(" ", 1)
-                    if len(parts) == 2:
-                        package_name = parts[0]
-                        json_str = parts[1]
-                        
-                        if package_name == "Char.Vitals":
-                            data = json.loads(json_str)
-                            if 'hp' in data and 'maxhp' in data:
-                                self.update_health(f"{data['hp']}/{data['maxhp']}")
-                            elif 'hp' in data: # Handle cases where maxhp might not be present
-                                self.update_health(f"{data['hp']}")
-                        elif package_name == "Char.Status":
-                            data = json.loads(json_str)
-                            if 'status' in data:
-                                self.status_message_label.config(text=f"Status: {data['status']}")
+                    # I'm processing full lines first (containing \n).
+                    while "\n" in line_buffer:
+                        # I'm finding the first newline, taking everything up to and including it.
+                        newline_index = line_buffer.find("\n")
+                        line_to_display = line_buffer[:newline_index + 1] # I'm including the newline character.
+                        line_buffer = line_buffer[newline_index + 1:] # This is the remaining part.
 
-            except (IndexError, json.JSONDecodeError, ValueError) as e:
-                logging.error(f"Error parsing GMCP message: {e} - Raw: {message}")
+                        # I'm removing carriage returns often paired with newlines in Telnet.
+                        line_to_display = line_to_display.replace("\r", "")
+                        
+                        # I'm displaying the line. It includes the newline, display_message just inserts it.
+                        self.root.after(0, self.display_message, line_to_display) 
+
+                    # This is my crucial heuristic for non-newline-terminated prompts:
+                    # If a prompt signal was explicitly received (from GA)
+                    # OR if there's no more raw telnet buffer left to process (meaning _parse_telnet_stream...
+                    # has processed all currently available bytes) AND
+                    # line_buffer has content AND it doesn't end with a newline,
+                    # then I'm assuming the current line_buffer is a prompt or final partial line
+                    # and should be displayed immediately.
+                    if is_prompt_signal or \
+                       (not self.telnet_buffer and line_buffer and \
+                        not (line_buffer.endswith('\n') or line_buffer.endswith('\r'))):
+                        
+                        display_text = line_buffer.replace("\r", "") 
+                        if display_text: # I'm only displaying if there's actual text to prevent empty lines.
+                            self.root.after(0, self.display_message, display_text) 
+                        line_buffer = "" # I'm clearing the buffer as it's been displayed.
+
+            except socket.timeout:
+                # No data received within the timeout period.
+                # If there's anything in line_buffer that hasn't been flushed by a newline,
+                # I'm considering it a prompt and displaying it now.
+                if line_buffer and not (line_buffer.endswith('\n') or line_buffer.endswith('\r')):
+                    display_text = line_buffer.replace("\r", "")
+                    if display_text:
+                        self.root.after(0, self.display_message, display_text)
+                    line_buffer = "" # I'm clearing the buffer after displaying this suspected prompt.
+                pass # I'll just continue the loop, waiting for more data.
+            except socket.error as e:
+                if self.connected: 
+                    logging.error(f"My socket error in receive_messages: {e}")
+                    self.root.after(0, lambda msg_text=f"--- My network error: {e} ---\n": self.display_message(msg_text, tags=("system_message", "ansi_31")))
+                    self.root.after(0, self.disconnect)
+                break
             except Exception as e:
-                logging.exception(f"Unexpected error in GMCP parsing: {e} - Raw: {message}")
+                logging.exception(f"An unexpected error occurred in my receive_messages: {e}")
+                self.root.after(0, lambda msg_text=f"--- An unexpected error occurred: {e} ---\n": self.display_message(msg_text, tags=("system_message", "ansi_31")))
+                self.root.after(0, self.disconnect)
+                break
+        
+        # After the loop (connection ended), I'll display any remaining text in the buffer.
+        if line_buffer:
+            line_buffer = line_buffer.replace("\r", "")
+            self.root.after(0, self.display_message, line_buffer + "\n")
+
+
+    def _parse_telnet_stream_for_display_and_gmcp(self):
+        """
+        I'm processing my `self.telnet_buffer` byte by byte, handling Telnet protocol,
+        extracting displayable text, and dispatching GMCP messages.
+        I yield tuples: (displayable text segment, is_prompt_signal).
+        `is_prompt_signal` is True if the segment was flushed by a GA and does not end with a newline.
+        """
+        i = 0
+        display_buffer = b"" # I'm accumulating bytes that are meant for display.
+        
+        while i < len(self.telnet_buffer):
+            byte = self.telnet_buffer[i:i+1] # This is the current byte being processed.
+            
+            is_prompt_signal = False # Default for each yielded chunk.
+
+            if self.telnet_parser_state == self.STATE_NORMAL:
+                if byte == self.IAC:
+                    # If I accumulated displayable text, I'll yield it before processing IAC.
+                    if display_buffer:
+                        yield display_buffer.decode('utf-8', errors='replace'), False # Not a prompt signal.
+                        display_buffer = b""
+                    self.telnet_parser_state = self.STATE_IAC
+                else:
+                    display_buffer += byte # I'm accumulating normal characters.
+            
+            elif self.telnet_parser_state == self.STATE_IAC:
+                command = byte
+                i += 1 # I'm advancing to the potential option byte.
+                
+                if command in (self.WILL, self.DO, self.WONT, self.DONT):
+                    if i >= len(self.telnet_buffer): # Not enough bytes for option, I'll wait for more.
+                        i -= 1 # I'm rewinding to the IAC command.
+                        break 
+                    
+                    option = self.telnet_buffer[i:i+1]
+                    logging.debug(f"TELNET: I received IAC {command!r} option {option!r}")
+                    
+                    # I'm responding to common Telnet negotiations.
+                    if command == self.WILL and option == self.GMCP:
+                        logging.info("TELNET: MUD WILL GMCP. I'm responding with DO GMCP.")
+                        self.sock.sendall(self.IAC + self.DO + self.GMCP)
+                    elif command == self.DO and option == self.SUPPRESS_GO_AHEAD:
+                        logging.info("TELNET: MUD DO SUPPRESS_GO_AHEAD. I'm responding with WILL SUPPRESS_GO_AHEAD.")
+                        self.sock.sendall(self.IAC + self.WILL + self.SUPPRESS_GO_AHEAD)
+                    elif command == self.DO and option == self.ECHO:
+                        logging.info("TELNET: MUD DO ECHO. I'm responding with WILL ECHO.")
+                        self.sock.sendall(self.IAC + self.WILL + self.ECHO)
+                    
+                    self.telnet_parser_state = self.STATE_NORMAL # Command + Option consumed.
+                
+                elif command == self.SB:
+                    self.telnet_parser_state = self.STATE_SB_READ_OPTION # I'm moving to the state to read the option byte.
+                    self.telnet_sub_buffer = b"" # I'm clearing the subnegotiation buffer.
+                
+                elif command == self.IAC: # Escaped IAC (IAC IAC means a literal 0xFF byte).
+                    display_buffer += self.IAC # I'm adding the actual IAC byte to display.
+                    self.telnet_parser_state = self.STATE_NORMAL
+                
+                elif command == self.SE: # Unexpected IAC SE (should only follow SB).
+                    logging.warning("TELNET: I received an unexpected IAC SE in STATE_IAC. Resetting to NORMAL.")
+                    self.telnet_parser_state = self.STATE_NORMAL
+                
+                elif command == self.NOP or command == self.GA: # Other single-byte IAC commands (e.g., NOP, GA).
+                    logging.debug(f"TELNET: I consumed a simple IAC command: {command!r}. Resetting to NORMAL.")
+                    
+                    if display_buffer: 
+                        decoded_text = display_buffer.decode('utf-8', errors='replace')
+                        # IMPORTANT: I'm signaling as a prompt ONLY if it's a GA AND the text does NOT end with a line break.
+                        if command == self.GA and not (decoded_text.endswith('\n') or decoded_text.endswith('\r')):
+                             is_prompt_signal = True
+                        yield decoded_text, is_prompt_signal 
+                        display_buffer = b"" 
+                    elif command == self.GA: # If GA comes without any preceding display_buffer.
+                        # This means an explicit prompt flush signal, even if no text preceded it.
+                        yield "", True # I'm signaling a prompt flush even if no text.
+                    
+                    self.telnet_parser_state = self.STATE_NORMAL # I'm consuming the command.
+            
+            # --- My Subnegotiation Handling ---
+            elif self.telnet_parser_state == self.STATE_SB_READ_OPTION:
+                option_byte = byte
+                logging.debug(f"TELNET: I'm in STATE_SB_READ_OPTION. My current byte (potential option): {option_byte!r}")
+                # I'm checking if the option is the standard GMCP byte OR one of my suspected GMCP data bytes.
+                if option_byte == self.GMCP or option_byte in self.GMCP_DATA_OPTIONS:
+                    self.telnet_parser_state = self.STATE_GMCP_SUB
+                    # THIS IS THE CRITICAL CHANGE: I'm initializing the sub_buffer WITH the option byte.
+                    self.telnet_sub_buffer = option_byte 
+                    logging.debug(f"TELNET: I recognized a GMCP option (negotiation or data). Initializing sub buffer with: {option_byte!r}")
+                else:
+                    logging.debug(f"TELNET: My unknown SB option: {option_byte!r}. I'm transitioning to consume its payload.")
+                    self.telnet_parser_state = self.STATE_UNKNOWN_SB
+                    self.telnet_sub_buffer = b"" # Still clear for unknown, as we don't care about its content.
+            
+            elif self.telnet_parser_state == self.STATE_GMCP_SUB:
+                # I'm inside GMCP subnegotiation.
+                if byte == self.IAC:
+                    # I'm checking if the next byte is SE (end of subnegotiation).
+                    if i + 1 < len(self.telnet_buffer) and self.telnet_buffer[i+1:i+2] == self.SE:
+                        # This is IAC SE, the end of GMCP subnegotiation.
+                        gmcp_raw_payload = self.telnet_sub_buffer 
+                        logging.debug(f"TELNET: GMCP Subnegotiation ended. My raw payload accumulated: {gmcp_raw_payload!r}")
+                        try:
+                            # I'm explicitly decoding from latin-1 because some MUDs might send raw bytes.
+                            gmcp_string = gmcp_raw_payload.decode('latin-1', errors='replace') 
+                            logging.debug(f"GMCP Dispatcher: My decoded GMCP string: '{gmcp_string}'")
+                            self.root.after(0, self._dispatch_gmcp_data, gmcp_string) 
+                        except Exception as e:
+                            logging.error(f"An error occurred decoding/dispatching my GMCP payload: {e}. Raw: {gmcp_raw_payload!r}")
+                            logging.exception("My GMCP decode/dispatch details")
+                        
+                        self.telnet_sub_buffer = b"" 
+                        self.telnet_parser_state = self.STATE_NORMAL 
+                        i += 1 # I'm consuming the SE byte as well.
+                    else: 
+                        # This is a literal IAC byte within GMCP payload, it should be escaped (IAC IAC).
+                        # I should *not* consume the next byte here, just add the current IAC.
+                        # This handles escaped IACs inside GMCP data.
+                        self.telnet_sub_buffer += byte
+                        logging.debug(f"TELNET: I found IAC inside GMCP sub. Appending to payload. My current payload: {self.telnet_sub_buffer!r}")
+                else: 
+                    # I'm accumulating actual GMCP payload bytes.
+                    self.telnet_sub_buffer += byte
+                    logging.debug(f"TELNET: Appending to GMCP payload. My current byte: {byte!r}. My current payload: {self.telnet_sub_buffer!r}")
+
+            elif self.telnet_parser_state == self.STATE_UNKNOWN_SB:
+                # I'm consuming bytes until IAC SE for unknown subnegotiations.
+                if byte == self.IAC:
+                    if i + 1 < len(self.telnet_buffer) and self.telnet_buffer[i+1:i+2] == self.SE:
+                        logging.debug("TELNET: My unknown subnegotiation ended (IAC SE detected).")
+                        self.telnet_sub_buffer = b"" 
+                        self.telnet_parser_state = self.STATE_NORMAL 
+                        i += 1 # I'm consuming the SE byte.
+                    else: 
+                        # This is a literal IAC byte within an unknown subnegotiation, I'll consume it.
+                        # For unknown SB, I generally just discard the payload, so no action on self.telnet_sub_buffer.
+                        pass 
+                else: 
+                    # I'm accumulating bytes of the unknown subnegotiation (or just discarding if not needed).
+                    # For now, I'm just moving the pointer 'i', effectively discarding.
+                    pass 
+
+            i += 1 
+
+        # This is my crucial part for handling partial lines/initial prompts that don't end in newline:
+        # If there's any remaining display_buffer after parsing all currently available bytes,
+        # I'll yield it. This forces receive_messages to process it.
+        if display_buffer:
+            yield display_buffer.decode('utf-8', errors='replace'), False # Not a prompt signal itself.
+
+        self.telnet_buffer = self.telnet_buffer[i:]
+
+
+    def _dispatch_gmcp_data(self, gmcp_string): 
+        """
+        I'm parsing raw messages for GMCP data and dispatching the parsed
+        package name and data (dict) to all my registered GMCP listeners.
+        """
+        # I'm NO LONGER CHECKING FOR "GMCP " prefix, as it's already stripped.
+        logging.debug(f"GMCP Dispatcher: I'm processing extracted GMCP. String: '{gmcp_string.strip()}'")
+        try:
+            payload = gmcp_string.strip() 
+            first_space_idx = payload.find(' ')
+            
+            package_name = payload
+            json_data = {}
+
+            if first_space_idx != -1:
+                package_name = payload[:first_space_idx]
+                json_string = payload[first_space_idx:].strip()
+                if json_string: 
+                    try:
+                        json_data = json.loads(json_string)
+                    except json.JSONDecodeError as e:
+                        logging.error(f"My GMCP JSON decode error for package '{package_name}': {e}. JSON string: '{json_string}'")
+                        json_data = {} 
+            
+            for listener in self.gmcp_listeners:
+                try:
+                    listener(package_name, json_data)
+                except Exception as e:
+                    logging.error(f"An error occurred calling my GMCP listener '{listener.__name__}': {e}")
+                    logging.exception("My GMCP listener callback details")
+
+        except Exception as e:
+            logging.error(f"I failed to parse my GMCP message: {e}. Message: {gmcp_string!r}") 
+            logging.exception("My GMCP parsing details")
+
+    def send_gmcp(self, package_name, data=None):
+        """
+        I'm sending a GMCP packet to the MUD.
+        package_name: e.g., "Client.Core.Supports"
+        data: dictionary to be JSON encoded, or None if no data.
+        """
+        if not self.connected or not self.sock:
+            logging.warning("I attempted to send GMCP but I'm not connected.")
+            return
+
+        payload_data = ""
+        if data is not None:
+            try:
+                # I'm ensuring compact JSON output for Telnet transmission.
+                payload_data = json.dumps(data, separators=(',', ':'))
+            except TypeError as e:
+                logging.error(f"An error occurred JSON encoding my GMCP data for {package_name}: {e}")
+                return
+
+        # GMCP packet format: IAC SB GMCP <package.name> <json_data> IAC SE
+        # \xff\xfa\xc9<package.name> <json_data>\xff\xf0
+        
+        # I'm building the full GMCP payload.
+        # Note: Package name and JSON data are space-separated within the GMCP payload.
+        gmcp_content = f"{package_name} {payload_data}".encode('utf-8')
+
+        # I'm encapsulating it with Telnet IAC SB GMCP and IAC SE.
+        # I'm using self.GMCP (b'\xc9') for sending, as the MUD negotiates with it.
+        full_packet = self.IAC + self.SB + self.GMCP + gmcp_content + self.IAC + self.SE
+
+        try:
+            self.sock.sendall(full_packet)
+            logging.debug(f"I sent GMCP: {package_name} {payload_data}")
+        except socket.error as e:
+            logging.error(f"A socket error occurred sending my GMCP: {e}")
+            self.disconnect()
+        except Exception as e:
+            logging.exception(f"An unexpected error occurred sending my GMCP {package_name}: {e}")
+
+    def send_initial_gmcp_supports(self):
+        """
+        I'm sending the Client.Core.Supports GMCP packet to the MUD,
+        declaring supported GMCP modules and versions.
+        """
+        # This is a standard set. I might need to adjust this based on my specific MUD's docs.
+        supported_modules = {
+            "Client.Core": ["1", "2"], # I'm indicating support for Client.Core versions 1 and 2.
+            "Room.Info": ["1"],        # I'm including Room.Info.
+            "Char.Buffs": ["1"],       # I'm including Char.Buffs.
+            "Char.Status": ["1"],      # I'm keeping Char.Status.
+            "Char.Cooldowns": ["1"],   # I'm including Char.Cooldowns.
+            "Char.Inventory": ["1"],   # I'm including Char.Inventory.
+            "Char.Vitals": ["1"],      # I'm keeping Char.Vitals (most MUDs send this).
+        }
+        self.send_gmcp("Client.Core.Supports", supported_modules)
+        logging.info("I sent the Client.Core.Supports GMCP packet with specific modules.")
 
     def send_message(self, event=None):
-        """Sends the text from the input entry to the MUD."""
+        """I'm sending the user's input to the MUD server."""
         if not self.connected or not self.sock:
-            self.display_message("--- Not connected. Cannot send message. ---", tags=("system_message", "ansi_31"))
+            self.display_message("I'm not connected to the MUD.\n", tags=("system_message", "ansi_31"))
             return
 
         message = self.input_entry.get()
-        if not message.strip(): # Don't send empty messages
-            return
+        # I'm allowing sending empty lines (just pressing Enter).
+        
+        self.input_entry.delete(0, tk.END) 
+
+        # I'm displaying the sent message locally with a distinct tag, always with a newline.
+        self.display_message(f"> {message}\n", tags=("user_input",))
 
         try:
-            self.sock.sendall((message + "\n").encode('utf-8')) # Encode and add newline
-            self.input_entry.delete(0, tk.END) # Clear input field
+            self.sock.sendall((message + "\n").encode('utf-8'))
+            logging.debug(f"I sent: {message!r}") # I'm using !r to clearly show if it's an empty string.
         except socket.error as e:
-            self.display_message(f"--- Failed to send message: {e} ---", tags=("system_message", "ansi_31"))
-            logging.error(f"Failed to send message: {e}")
-            self.disconnect() # Disconnect on send error
+            self.display_message(f"An error occurred sending my message: {e}\n", tags=("system_message", "ansi_31"))
+            logging.error(f"My socket error sending message: {e}")
+            self.disconnect() 
         except Exception as e:
-            self.display_message(f"--- Unexpected error sending message: {e} ---", tags=("system_message", "ansi_31"))
-            logging.exception(f"Unexpected error sending message: {e}")
+            self.display_message(f"An unexpected error occurred while I was sending: {e}\n", tags=("system_message", "ansi_31"))
+            logging.exception("An unexpected error occurred while I was sending my message")
 
-    # Mod loading functionality
-    def load_mods(self):
-        """
-        Discovers and loads Python modules from the 'mods' directory
-        located in the project's root folder.
-        """
-        # Determine the directory of the current script (src/mud_client_app.py)
-        current_script_dir = os.path.dirname(__file__)
-        # Go up one level from 'src' to 'your_project_root'
-        parent_dir = os.path.abspath(os.path.join(current_script_dir, os.pardir))
-        # Construct the full path to the 'mods' directory
-        mods_dir = os.path.join(parent_dir, "mods")
-
-        # Ensure the mods directory exists
-        if not os.path.exists(mods_dir):
-            os.makedirs(mods_dir)
-            self.display_message(f"--- Created '{mods_dir}' directory for mods. ---", tags=("system_message",))
-            return
-
-        # Add the mods directory to Python's path so modules can be imported dynamically
-        if mods_dir not in sys.path:
-            sys.path.insert(0, mods_dir)
-            logging.info(f"Added '{mods_dir}' to sys.path.")
-
-        self.display_message(f"--- Loading mods from '{mods_dir}' ---", tags=("system_message",))
-        
-        # Clear previously loaded mods and their GUI elements
-        for mod_instance in self.loaded_mods:
-            if hasattr(mod_instance, '_mod_frame') and mod_instance._mod_frame.winfo_exists():
-                mod_instance._mod_frame.destroy() # Destroy the mod's specific GUI frame
-            # If mod had any cleanup logic, you'd call it here
-        self.loaded_mods = [] # Reset the list of loaded mods
-
-        # Iterate through files in the mods directory
-        for filename in os.listdir(mods_dir):
-            if filename.endswith(".py") and filename != "__init__.py": # Process Python files, ignore __init__.py
-                module_name = filename[:-3] # Get module name by removing .py extension
-                file_path = os.path.join(mods_dir, filename)
-                
-                try:
-                    # Create a module specification from the file path
-                    spec = importlib.util.spec_from_file_location(module_name, file_path)
-                    if spec is None:
-                        logging.error(f"Could not load module spec for {filename}")
-                        self.root.after(0, lambda fn=filename: self.display_message(f"--- Failed to load mod '{fn}': Invalid module spec. ---", tags=("system_message", "ansi_31")))
-                        continue
-
-                    # Create a new module object and execute its code
-                    mod = importlib.util.module_from_spec(spec)
-                    sys.modules[module_name] = mod # Add to sys.modules to prevent re-imports/resolve internal dependencies
-                    spec.loader.exec_module(mod) # Run the module's code
-
-                    # Check if the mod has the expected 'setup_mod_gui' function
-                    if hasattr(mod, 'setup_mod_gui') and callable(mod.setup_mod_gui):
-                        # Create a dedicated Tkinter LabelFrame for this mod's GUI
-                        mod_frame = tk.LabelFrame(self.mod_container_frame, text=module_name.replace('_', ' ').title(), padx=5, pady=5)
-                        mod_frame.pack(fill=tk.X, pady=5, padx=5, expand=False) # Each mod frame fills horizontally within its container
-                        
-                        # Store a reference to this frame on the mod object itself
-                        # This allows the client to clean up the mod's GUI if mods are reloaded
-                        mod._mod_frame = mod_frame 
-
-                        # Call the mod's setup function, passing its designated frame and the client instance
-                        # This allows the mod to build its GUI and interact with the client
-                        mod.setup_mod_gui(mod_frame, self)
-                        self.loaded_mods.append(mod) # Store reference to the loaded module
-                        self.root.after(0, lambda mn=module_name: self.display_message(f"--- Mod '{mn}' loaded successfully. ---", tags=("system_message", "ansi_32")))
-                    else:
-                        self.root.after(0, lambda fn=filename: self.display_message(f"--- Mod '{fn}' skipped: 'setup_mod_gui' function not found or not callable. ---", tags=("system_message", "ansi_33")))
-                        logging.warning(f"Mod '{filename}' skipped: 'setup_mod_gui' function not found or not callable.")
-
-                except Exception as e:
-                    # Log and display any errors during mod loading
-                    self.root.after(0, lambda fn=filename, err=e: self.display_message(f"--- Error loading mod '{fn}': {err} ---", tags=("system_message", "ansi_31")))
-                    logging.exception(f"Error loading mod '{filename}'")
-        self.root.after(0, lambda: self.display_message(f"--- Finished loading mods. Loaded {len(self.loaded_mods)} mods. ---", tags=("system_message",)))
 
     def on_closing(self):
-        """Handles closing the application window gracefully, prompting to disconnect if connected."""
+        """I'm handling proper disconnection when the window is closed."""
         if self.connected:
-            if messagebox.askokcancel("Quit", "You are connected. Disconnect and quit?"):
-                self.disconnect() # Disconnect first
-                self.root.destroy() # Close the window
-            # If user cancels, keep window open
+            if messagebox.askokcancel("Quit", "I'm connected. Do I disconnect and Quit?"):
+                self.disconnect()
+                self.root.destroy()
         else:
-            self.root.destroy() # If not connected, just close the window
+            self.root.destroy()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MUDClientApp(root)
+    root.mainloop()

@@ -1003,9 +1003,10 @@ class MUDClientApp:
     def request_char_gmcp(self):
         """Sends GMCP requests to get current character vitals, status, and equipped items."""
         logging.info("Requesting Char.Vitals, Char.Status, and Char.Items.Equip via GMCP.")
-        self.send_gmcp("Char.Vitals")
-        self.send_gmcp("Char.Status")
-        self.send_gmcp("Char.Items.Equip")
+        self.send_gmcp("Char.Vitals", {})
+        self.send_gmcp("Char.Status", {})
+        self.send_gmcp("Char.Items.Equip", {})
+        self.send_gmcp("Room.Info", {}) # Also commonly useful for HUD updates
 
     def send_message(self, event=None):
         if not self.connected or not self.sock:
@@ -1027,7 +1028,12 @@ class MUDClientApp:
 
         try:
             self.sock.sendall((message_to_send + "\n").encode('utf-8'))
-            # logging.debug(f"Sent: {message_to_send!r} (originally: {raw_message!r})") # Removed, less critical
+            logging.debug(f"Sent: {message_to_send!r} (originally: {raw_message!r})")
+
+        
+            self.request_char_gmcp()
+           
+
         except socket.error as e:
             self.display_message(f"An error occurred sending message: {e}\n", tags=("system_message", "ansi_31"))
             self.speak_system_message(f"Error sending message: {e}.")
